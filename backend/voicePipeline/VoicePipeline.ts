@@ -1,12 +1,15 @@
 import {
   AudioFrame,
+  AudioSource,
   AudioStream,
+  LocalAudioTrack,
   Room,
   RoomEvent,
   TrackKind,
+  TrackSource,
 } from '@livekit/rtc-node';
 import { transcribeAudio } from './services/elevenLabsStt';
-import { synthesizeSpeech } from './services/elevenLabsTts';
+import { synthesizeSpeech, synthesizeSpeechPcm } from './services/elevenLabsTts';
 import { generateGeminiResponse } from './services/gemini';
 
 type VoicePipelineState = 'idle' | 'armed' | 'listening' | 'processing';
@@ -36,6 +39,11 @@ export type VoicePipelineConfig = {
   publishTtsToRoom?: boolean;
   ttsDataTopic?: string;
   ttsDataReliable?: boolean;
+  publishTtsAudioTrack?: boolean;
+  ttsAudioSampleRate?: number;
+  ttsAudioChannels?: number;
+  ttsAudioFrameMs?: number;
+  ttsAudioTrackName?: string;
   onStateChange?: (state: VoicePipelineState) => void;
   onTranscript?: (text: string, isFinal: boolean) => void;
   onGeminiResponse?: (text: string) => void;
@@ -55,6 +63,10 @@ export class VoicePipeline {
   private samplesBuffer: number[] = [];
   private bufferSampleRate: number | null = null;
   private processingStream = false;
+  private ttsSource: AudioSource | null = null;
+  private ttsTrack: LocalAudioTrack | null = null;
+  private ttsSampleRate: number | null = null;
+  private ttsChannels: number | null = null;
 
   constructor(config: VoicePipelineConfig) {
     this.config = config;
@@ -100,6 +112,18 @@ export class VoicePipeline {
     this.running = false;
 
     if (this.room) {
+      if (this.ttsTrack?.sid) {
+        try {
+          await this.room.localParticipant?.unpublishTrack(this.ttsTrack.sid);
+        } catch {
+          // Ignore publish cleanup errors on shutdown.
+        }
+      }
+      await this.ttsTrack?.close();
+      this.ttsTrack = null;
+      this.ttsSource = null;
+      this.ttsSampleRate = null;
+      this.ttsChannels = null;
       await this.room.disconnect();
       this.room = null;
     }
@@ -273,11 +297,115 @@ export class VoicePipeline {
           topic,
         });
       }
+
+      if (this.config.publishTtsAudioTrack) {
+        await this.publishTtsAudioTrack(responseText);
+      }
     } catch (error) {
       this.emitError(error);
     } finally {
       this.setState('armed');
     }
+  }
+
+  private async publishTtsAudioTrack(text: string): Promise<void> {
+    const sampleRate = this.config.ttsAudioSampleRate ?? 16000;
+    const channels = this.config.ttsAudioChannels ?? 1;
+    const outputFormat = `pcm_${sampleRate}`;
+
+    const pcm = await synthesizeSpeechPcm({
+      apiKey: this.config.elevenLabsApiKey,
+      voiceId: this.config.elevenLabsVoiceId,
+      text,
+      modelId: this.config.elevenLabsTtsModelId,
+      outputFormat,
+      sampleRate,
+      channels,
+    });
+
+    const normalized =
+      pcm.channels === 1 ? pcm.samples : this.mixToMono(pcm.samples, pcm.channels);
+    await this.publishPcmAudio(normalized, pcm.sampleRate, 1);
+  }
+
+  private mixToMono(samples: Int16Array, channels: number): Int16Array {
+    const samplesPerChannel = Math.floor(samples.length / channels);
+    const mono = new Int16Array(samplesPerChannel);
+    for (let i = 0; i < samplesPerChannel; i += 1) {
+      let sum = 0;
+      for (let ch = 0; ch < channels; ch += 1) {
+        sum += samples[i * channels + ch];
+      }
+      mono[i] = Math.round(sum / channels);
+    }
+    return mono;
+  }
+
+  private async publishPcmAudio(
+    samples: Int16Array,
+    sampleRate: number,
+    channels: number
+  ): Promise<void> {
+    if (!this.room?.localParticipant) return;
+
+    const source = await this.ensureTtsSource(sampleRate, channels);
+    if (!source) return;
+
+    const frameMs = this.config.ttsAudioFrameMs ?? 20;
+    const samplesPerChannel = Math.max(1, Math.floor((sampleRate * frameMs) / 1000));
+    const frameSize = samplesPerChannel * channels;
+
+    for (let offset = 0; offset < samples.length; offset += frameSize) {
+      const frameSamples =
+        offset + frameSize <= samples.length
+          ? samples.subarray(offset, offset + frameSize)
+          : this.padFrame(samples.subarray(offset), frameSize);
+      const frame = new AudioFrame(
+        frameSamples,
+        sampleRate,
+        channels,
+        samplesPerChannel
+      );
+      await source.captureFrame(frame);
+    }
+
+    await source.waitForPlayout();
+  }
+
+  private padFrame(samples: Int16Array, frameSize: number): Int16Array {
+    const padded = new Int16Array(frameSize);
+    padded.set(samples);
+    return padded;
+  }
+
+  private async ensureTtsSource(
+    sampleRate: number,
+    channels: number
+  ): Promise<AudioSource | null> {
+    if (!this.room?.localParticipant) return null;
+
+    if (this.ttsSource && this.ttsTrack) {
+      if (this.ttsSampleRate !== sampleRate || this.ttsChannels !== channels) {
+        throw new Error(
+          `TTS audio format mismatch: expected ${this.ttsSampleRate}Hz/${this.ttsChannels}ch, got ${sampleRate}Hz/${channels}ch`
+        );
+      }
+      return this.ttsSource;
+    }
+
+    const source = new AudioSource(sampleRate, channels);
+    const trackName = this.config.ttsAudioTrackName ?? 'aura-tts';
+    const track = LocalAudioTrack.createAudioTrack(trackName, source);
+    await this.room.localParticipant.publishTrack(track, {
+      source: TrackSource.SOURCE_MICROPHONE,
+    });
+
+    this.ttsSource = source;
+    this.ttsTrack = track;
+    this.ttsSampleRate = sampleRate;
+    this.ttsChannels = channels;
+
+    return source;
   }
 
   private setState(next: VoicePipelineState): void {

@@ -39,6 +39,11 @@ const pipeline = new VoicePipeline({
   publishTtsToRoom: parseBool(process.env.PUBLISH_TTS_TO_ROOM),
   ttsDataTopic: process.env.TTS_DATA_TOPIC,
   ttsDataReliable: parseBool(process.env.TTS_DATA_RELIABLE),
+  publishTtsAudioTrack: parseBool(process.env.PUBLISH_TTS_AUDIO_TRACK),
+  ttsAudioSampleRate: parseNumber(process.env.TTS_AUDIO_SAMPLE_RATE),
+  ttsAudioChannels: parseNumber(process.env.TTS_AUDIO_CHANNELS),
+  ttsAudioFrameMs: parseNumber(process.env.TTS_AUDIO_FRAME_MS),
+  ttsAudioTrackName: process.env.TTS_AUDIO_TRACK_NAME,
   onStateChange: (state) => console.log('[state]', state),
   onTranscript: (text, isFinal) =>
     console.log('[transcript]', text, { isFinal }),

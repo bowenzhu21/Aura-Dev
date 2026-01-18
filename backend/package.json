@@ -11,7 +11,9 @@
     "start": "node dist/scripts/runPipeline.js"
   },
   "dependencies": {
-    "@livekit/rtc-node": "^0.13.24"
+    "@livekit/rtc-node": "^0.13.24",
+    "livekit-client": "^2.17.0",
+    "livekit-server-sdk": "^2.15.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.30",
