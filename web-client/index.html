@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aura Voice Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #1e1e1e;
+            color: #fff;
+        }
+        h1 {
+            color: #61dafb;
+        }
+        .container {
+            background: #2d2d2d;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #444;
+            border-radius: 5px;
+            background: #1e1e1e;
+            color: #fff;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-bottom: 10px;
+            transition: background 0.3s;
+        }
+        .connect-btn {
+            background: #61dafb;
+            color: #000;
+        }
+        .connect-btn:hover {
+            background: #4fa8c5;
+        }
+        .connect-btn:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+        .disconnect-btn {
+            background: #f44336;
+            color: #fff;
+            display: none;
+        }
+        .disconnect-btn:hover {
+            background: #d32f2f;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            text-align: center;
+        }
+        .status.disconnected {
+            background: #444;
+            color: #aaa;
+        }
+        .status.connecting {
+            background: #ff9800;
+            color: #000;
+        }
+        .status.connected {
+            background: #4caf50;
+            color: #fff;
+        }
+        .instructions {
+            background: #333;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #61dafb;
+        }
+        code {
+            background: #1e1e1e;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        .transcript-box {
+            background: #333;
+            padding: 20px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .transcript-line {
+            color: #61dafb;
+            margin-bottom: 8px;
+        }
+        .transcript-line .time {
+            color: #888;
+            font-size: 12px;
+            margin-right: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Aura Voice Client</h1>
+
+        <div class="input-group">
+            <label for="tokenUrl">Token Server URL:</label>
+            <input type="text" id="tokenUrl" placeholder="http://localhost:3000/token" value="http://localhost:3000/token">
+        </div>
+
+        <div class="input-group">
+            <label for="room">Room Name:</label>
+            <input type="text" id="room" placeholder="demo-chat" value="demo-chat">
+        </div>
+
+        <div class="input-group">
+            <label for="identity">Your Identity:</label>
+            <input type="text" id="identity" placeholder="web-user" value="web-user">
+        </div>
+
+        <button class="connect-btn" id="connectBtn" onclick="connect()">Connect & Start Voice</button>
+        <button class="disconnect-btn" id="disconnectBtn" onclick="disconnect()">Disconnect</button>
+
+        <div class="status disconnected" id="status">
+            Disconnected
+        </div>
+
+        <div class="transcript-box" id="transcriptBox" style="display: none;">
+            <h3 style="margin-top: 0; color: #61dafb;">Live Transcript:</h3>
+            <div id="transcriptContent" style="min-height: 100px; max-height: 300px; overflow-y: auto; background: #1e1e1e; padding: 15px; border-radius: 5px; font-family: monospace; line-height: 1.6;">
+                <div style="color: #888;">Waiting for speech...</div>
+            </div>
+        </div>
+
+        <div class="instructions">
+            <h3>Instructions:</h3>
+            <ol>
+                <li>Make sure backend is running: <code>cd backend && npm run dev</code></li>
+                <li>Make sure token server is running: <code>cd backend/token-server && npm start</code></li>
+                <li>Make sure codingterminal is running: <code>cd codingterminal && ./aura.sh ws://localhost:8765</code></li>
+                <li>Click "Connect & Start Voice"</li>
+                <li>Allow microphone access</li>
+                <li>Say <strong>"Hey Aura"</strong> to activate</li>
+                <li>Ask your coding question!</li>
+            </ol>
+        </div>
+    </div>
+
+    <script type="module">
+        import { Room } from 'https://esm.sh/livekit-client@2.5.8';
+
+        let room = null;
+        let transcriptWs = null;
+
+        function updateStatus(message, className) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = 'status ' + className;
+        }
+
+        function addTranscript(text) {
+            const transcriptBox = document.getElementById('transcriptBox');
+            const transcriptContent = document.getElementById('transcriptContent');
+
+            // Show the transcript box
+            transcriptBox.style.display = 'block';
+
+            // Clear "Waiting for speech..." message
+            if (transcriptContent.querySelector('[style*="color: #888"]')) {
+                transcriptContent.innerHTML = '';
+            }
+
+            // Highlight wake and stop words
+            let highlightedText = text;
+            const wakeWords = ['hey aura', 'hi aura', 'hello aura', 'yo aura', 'ok aura', 'aura'];
+            const stopWords = ['bye aura', 'stop aura', 'cancel', 'nevermind'];
+
+            // Check for wake words
+            let hasWake = false;
+            let hasStop = false;
+            const lowerText = text.toLowerCase();
+
+            for (const word of wakeWords) {
+                if (lowerText.includes(word)) {
+                    const regex = new RegExp(`(${word})`, 'gi');
+                    highlightedText = highlightedText.replace(regex, '<span style="background: #4caf50; color: #000; padding: 2px 6px; border-radius: 3px; font-weight: bold;">$1</span>');
+                    hasWake = true;
+                    break;
+                }
+            }
+
+            for (const word of stopWords) {
+                if (lowerText.includes(word)) {
+                    const regex = new RegExp(`(${word})`, 'gi');
+                    highlightedText = highlightedText.replace(regex, '<span style="background: #f44336; color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: bold;">$1</span>');
+                    hasStop = true;
+                    break;
+                }
+            }
+
+            // Add new transcript line with timestamp
+            const time = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.className = 'transcript-line';
+
+            let prefix = '';
+            if (hasWake) prefix = '🟢 ';
+            if (hasStop) prefix = '🔴 ';
+
+            line.innerHTML = `<span class="time">[${time}]</span> ${prefix}${highlightedText}`;
+            transcriptContent.appendChild(line);
+
+            // Auto-scroll to bottom
+            transcriptContent.scrollTop = transcriptContent.scrollHeight;
+        }
+
+        function connectToTranscriptStream() {
+            // Connect to backend WebSocket to receive transcripts
+            const wsUrl = 'ws://localhost:8765';
+            transcriptWs = new WebSocket(wsUrl);
+
+            transcriptWs.onopen = () => {
+                console.log('✓ Connected to transcript stream');
+            };
+
+            transcriptWs.onmessage = (event) => {
+                console.log('📥 Received WebSocket message:', event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('📋 Parsed data:', data);
+                    // Accept both 'query' (for Claude Code) and 'transcript' (for display)
+                    if ((data.type === 'query' || data.type === 'transcript') && data.content) {
+                        console.log('✅ Adding transcript:', data.content);
+                        addTranscript(data.content);
+                    } else {
+                        console.log('⚠️ Unknown message type or no content:', data);
+                    }
+                } catch (error) {
+                    console.error('Failed to parse transcript message:', error);
+                }
+            };
+
+            transcriptWs.onerror = (error) => {
+                console.error('Transcript WebSocket error:', error);
+            };
+
+            transcriptWs.onclose = () => {
+                console.log('Transcript stream disconnected');
+            };
+        }
+
+        window.connect = async function() {
+            const tokenUrl = document.getElementById('tokenUrl').value;
+            const roomName = document.getElementById('room').value;
+            const identity = document.getElementById('identity').value;
+
+            const connectBtn = document.getElementById('connectBtn');
+            const disconnectBtn = document.getElementById('disconnectBtn');
+
+            try {
+                updateStatus('Fetching token...', 'connecting');
+                connectBtn.disabled = true;
+
+                // Fetch token
+                const url = `${tokenUrl}?room=${roomName}&identity=${identity}`;
+                console.log('Fetching token from:', url);
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                console.log('Token response:', data);
+
+                if (!data.token) {
+                    throw new Error('No token received');
+                }
+
+                updateStatus('Connecting to LiveKit...', 'connecting');
+
+                // Connect to LiveKit
+                room = new Room();
+
+                await room.connect(data.url, data.token);
+
+                updateStatus('Connected! Enabling microphone...', 'connecting');
+
+                // Enable microphone
+                await room.localParticipant.setMicrophoneEnabled(true);
+
+                updateStatus('✓ Connected! Say "Hey Aura" to start', 'connected');
+
+                connectBtn.style.display = 'none';
+                disconnectBtn.style.display = 'block';
+
+                // Connect to transcript stream to see what you're saying
+                connectToTranscriptStream();
+
+                console.log('Connected to room:', roomName);
+                console.log('Room participants:', room.remoteParticipants.size);
+
+            } catch (error) {
+                console.error('Connection failed:', error);
+                updateStatus('Connection failed: ' + error.message, 'disconnected');
+                connectBtn.disabled = false;
+            }
+        }
+
+        window.disconnect = function() {
+            if (room) {
+                room.disconnect();
+                room = null;
+            }
+
+            const connectBtn = document.getElementById('connectBtn');
+            const disconnectBtn = document.getElementById('disconnectBtn');
+
+            connectBtn.style.display = 'block';
+            connectBtn.disabled = false;
+            disconnectBtn.style.display = 'none';
+
+            updateStatus('Disconnected', 'disconnected');
+            console.log('Disconnected from room');
+        }
+    </script>
+</body>
+</html>

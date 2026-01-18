@@ -8,16 +8,24 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx scripts/runPipeline.ts",
-    "start": "node dist/scripts/runPipeline.js"
+    "start": "node dist/scripts/runPipeline.js",
+    "bridge": "tsx bridgeOnly.ts",
+    "test-bridge": "tsx testBridge.ts"
   },
   "dependencies": {
     "@livekit/rtc-node": "^0.13.24",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.3",
+    "express": "^5.2.1",
     "livekit-client": "^2.17.0",
-    "livekit-server-sdk": "^2.15.0"
+    "livekit-server-sdk": "^2.15.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^20.19.30",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"
   },

@@ -3,12 +3,22 @@ import json
 import asyncio
 import websockets
 import subprocess
+import os
+import sys
 
 # Paths
 SCRIPT_FILE = "logs/claude_session.log"
 JSON_FILE = "logs/responses.json"
-WS_URL = "ws://localhost:8765"  # Parser connects locally
 TMUX_SESSION = "claude_aura"
+
+# WebSocket URL - can be configured via:
+# 1. Command line argument: python parser.py ws://your-ngrok-url
+# 2. Environment variable: BRIDGE_WS_URL=ws://your-ngrok-url python parser.py
+# 3. Default: ws://localhost:8765
+if len(sys.argv) > 1:
+    WS_URL = sys.argv[1]
+else:
+    WS_URL = os.environ.get("BRIDGE_WS_URL", "ws://localhost:8765")
 
 # Regex to remove ANSI escape codes
 ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
@@ -29,6 +39,7 @@ with open(JSON_FILE, "w", encoding="utf-8") as f:
     json.dump(responses, f, ensure_ascii=False, indent=2)
 
 print("Live parser running. Starting fresh.")
+print(f"WebSocket URL: {WS_URL}")
 print("Watching for new responses only...\n")
 
 def process_line(line, current_capture, collecting_options, responses):
@@ -297,9 +308,13 @@ async def main():
     # Shared dictionary to track the last response with options
     last_response_with_options = {}
 
-    # Try to connect to websocket server
+    # Try to connect to websocket server with keepalive
     try:
-        websocket = await websockets.connect(WS_URL)
+        websocket = await websockets.connect(
+            WS_URL,
+            ping_interval=20,  # Send ping every 20 seconds
+            ping_timeout=10    # Wait 10 seconds for pong response
+        )
         print(f"✓ Connected to websocket server at {WS_URL}")
         print(f"✓ Bidirectional mode: sending responses AND receiving queries")
     except Exception as e:

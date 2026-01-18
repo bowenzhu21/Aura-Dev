@@ -68,6 +68,7 @@ export class VoicePipeline {
   private samplesBuffer: number[] = [];
   private bufferSampleRate: number | null = null;
   private processingStream = false;
+  private speaking = false;
   private ttsSource: AudioSource | null = null;
   private ttsTrack: LocalAudioTrack | null = null;
   private ttsSampleRate: number | null = null;
@@ -137,6 +138,41 @@ export class VoicePipeline {
     this.setState('idle');
   }
 
+  async speakText(text: string): Promise<void> {
+    if (!this.running || !this.room) {
+      throw new Error('Pipeline is not running');
+    }
+
+    try {
+      this.speaking = true;
+      const sampleRate = this.config.ttsAudioSampleRate ?? 16000;
+      const channels = this.config.ttsAudioChannels ?? 1;
+      const outputFormat = `pcm_${sampleRate}`;
+
+      const pcm = await synthesizeSpeechPcm({
+        apiKey: this.config.elevenLabsApiKey,
+        voiceId: this.config.elevenLabsVoiceId,
+        text,
+        modelId: this.config.elevenLabsTtsModelId,
+        outputFormat,
+        sampleRate,
+        channels,
+      });
+
+      const normalized =
+        pcm.channels === 1 ? pcm.samples : this.mixToMono(pcm.samples, pcm.channels);
+      await this.publishPcmAudio(normalized, pcm.sampleRate, 1);
+
+      // Add a small buffer after speaking to avoid picking up trailing audio
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } catch (error) {
+      this.emitError(error);
+      throw error;
+    } finally {
+      this.speaking = false;
+    }
+  }
+
   private async processAudioTrack(track: { kind?: TrackKind }): Promise<void> {
     if (!this.running) return;
 
@@ -157,7 +193,7 @@ export class VoicePipeline {
   }
 
   private async handleAudioFrame(frame: AudioFrame): Promise<void> {
-    if (this.state === 'processing') return;
+    if (this.state === 'processing' || this.speaking) return;
 
     const mono = this.toMonoSamples(frame);
     await this.appendSamples(mono, frame.sampleRate);

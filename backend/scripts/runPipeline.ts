@@ -3,6 +3,7 @@ import 'dotenv/config';
 
 import { VoicePipeline } from '../voicePipeline/VoicePipeline';
 import { AccessToken } from 'livekit-server-sdk';
+import { HttpBridgeWebSocketServer } from '../httpWebsocketServer';
 
 /* -------------------- Helpers -------------------- */
 
@@ -48,7 +49,29 @@ const makeLiveKitToken = async (): Promise<string> => {
 
 /* ----------------- Pipeline ---------------------- */
 
-const pipeline = new VoicePipeline({
+// Track pipeline state to only send transcripts during listening phase
+let currentState: 'idle' | 'armed' | 'listening' | 'processing' = 'idle';
+
+// Declare pipeline variable first so it can be referenced in callbacks
+let pipeline: VoicePipeline;
+
+/* ----------------- WebSocket Bridge -------------- */
+
+const bridgeServer = new HttpBridgeWebSocketServer({
+  port: parseNumber(process.env.BRIDGE_WS_PORT) ?? 8765,
+  onClaudeResponse: async (response) => {
+    console.log('[bridge] Claude response received:', response);
+    // TTS disabled to prevent instability
+    // If you want to enable voice responses, uncomment the TTS code below
+  },
+  onError: (error) => {
+    console.error('[bridge] WebSocket error:', error);
+  },
+});
+
+/* ----------------- Initialize Pipeline ----------- */
+
+pipeline = new VoicePipeline({
   livekitUrl: requireEnv('LIVEKIT_URL'),
   livekitToken: makeLiveKitToken,
 
@@ -79,10 +102,45 @@ const pipeline = new VoicePipeline({
   wakePhrase: process.env.WAKE_PHRASE ?? 'hey aura',
   sleepPhrase: process.env.SLEEP_PHRASE ?? 'bye aura',
 
-  onStateChange: (state) => console.log('[state]', state),
-  onTranscript: (text, isFinal) =>
-    console.log('[transcript]', text, { isFinal }),
-  onGeminiResponse: (text) => console.log('[gemini]', text),
+  onStateChange: (state) => {
+    currentState = state;
+    console.log('[state]', state);
+    // When entering processing state, the full query is about to be sent
+    if (state === 'processing') {
+      console.log('[bridge] User finished speaking, query will be sent to Claude');
+    }
+  },
+  onTranscript: (text, isFinal) => {
+    console.log('[transcript]', text, { isFinal });
+
+    if (isFinal && text.trim()) {
+      // Always send to browser for display
+      bridgeServer.sendTranscriptDisplay(text);
+
+      // Only send to Claude Code when in "listening" state
+      // (after wake word detected, before stop word detected)
+      if (currentState === 'listening') {
+        // Strip wake/stop words before sending to Claude Code
+        let cleanedText = text
+          .replace(/\b(hey|hi|hello|yo|ok)\s+(aura|ora|or uh|aara)\b/gi, '')
+          .replace(/\b(bye|stop|cancel|shut up|nevermind|that's all)\s+(aura|ora)\b/gi, '')
+          .replace(/\baura\b/gi, '')
+          .replace(/[,!?]+/g, '')  // Remove trailing punctuation
+          .trim();
+
+        // Only send if there's actual content after filtering
+        if (cleanedText) {
+          bridgeServer.sendTranscript(cleanedText);
+          console.log('[bridge] Sent transcript to codingterminal:', cleanedText);
+        }
+      }
+    }
+  },
+  onGeminiResponse: (text) => {
+    console.log('[gemini]', text);
+    // Optionally send Gemini's response to the bridge as well
+    // bridgeServer.broadcast(JSON.stringify({ type: 'gemini_response', content: text }));
+  },
   onAudioReady: (audio) => console.log('[audio-bytes]', audio.byteLength),
   onError: (error) => console.error('[error]', error),
 });
@@ -90,6 +148,8 @@ const pipeline = new VoicePipeline({
 /* ----------------- Lifecycle --------------------- */
 
 const start = async () => {
+  console.log('Starting bridge server...');
+  await bridgeServer.start();
   console.log('Starting voice pipeline...');
   await pipeline.start();
 };
@@ -97,6 +157,7 @@ const start = async () => {
 const stop = async () => {
   console.log('Stopping voice pipeline...');
   await pipeline.stop();
+  await bridgeServer.close();
 };
 
 process.on('SIGINT', () => {
