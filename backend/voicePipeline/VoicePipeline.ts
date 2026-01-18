@@ -12,6 +12,7 @@ import {
 import { transcribeAudio } from './services/elevenLabsStt';
 import { synthesizeSpeech, synthesizeSpeechPcm } from './services/elevenLabsTts';
 import { generateGeminiResponse } from './services/gemini';
+import { classifyWakeStop } from "./services/geminiClassifier";
 
 type VoicePipelineState = 'idle' | 'armed' | 'listening' | 'processing';
 
@@ -53,6 +54,9 @@ export type VoicePipelineConfig = {
 };
 
 export class VoicePipeline {
+  private gateBuffer: string[] = [];
+  private lastClassifyAt = 0;
+  private readonly classifyCooldownMs = 1200; // don't spam Gemini
   private readonly config: VoicePipelineConfig;
   private readonly wakePhrase: string;
   private readonly sleepPhrase: string;
@@ -68,8 +72,6 @@ export class VoicePipeline {
   private ttsTrack: LocalAudioTrack | null = null;
   private ttsSampleRate: number | null = null;
   private ttsChannels: number | null = null;
-  private silenceTimer: NodeJS.Timeout | null = null;
-  private readonly silenceMs = 10_000;
 
   constructor(config: VoicePipelineConfig) {
     this.config = config;
@@ -119,7 +121,6 @@ export class VoicePipeline {
         try {
           await this.room.localParticipant?.unpublishTrack(this.ttsTrack.sid);
         } catch {
-          // Ignore publish cleanup errors on shutdown.
         }
       }
       await this.ttsTrack?.close();
@@ -223,53 +224,82 @@ export class VoicePipeline {
     }
   }
 
-  private normalize(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")  // strip punctuation
-    .replace(/\s+/g, " ")
-    .trim();
-  }
-
-
   private handleTranscript(message: TranscriptMessage): void {
-  const raw = message.text.trim();
-  if (!raw) return;
+  const text = message.text.trim();
+  if (!text) return;
 
-  this.config.onTranscript?.(raw, Boolean(message.isFinal));
+  this.config.onTranscript?.(text, Boolean(message.isFinal));
 
-  const norm = this.normalize(raw);
-  const wake = this.normalize(this.wakePhrase);
-  const sleep = this.normalize(this.sleepPhrase);
-
+  // While armed, we accumulate a little text and ask Gemini if it's a "wake"
   if (this.state === "armed") {
-    const wakeIndex = norm.indexOf(wake);
-    if (wakeIndex === -1) return;
+    this.gateBuffer.push(text);
 
-    this.transcriptBuffer = [];
+    const now = Date.now();
+    const tooSoon = now - this.lastClassifyAt < this.classifyCooldownMs;
 
-    // keep anything after wake phrase (normalized)
-    const afterWake = norm.slice(wakeIndex + wake.length).trim();
-    if (afterWake) this.transcriptBuffer.push(afterWake);
+    // only classify once we have some signal, and not too frequently
+    if (tooSoon || this.gateBuffer.join(" ").length < 8) return;
 
-    this.setState("listening");
+    this.lastClassifyAt = now;
+    const candidate = this.gateBuffer.join(" ").slice(-200); // keep it short
+    this.gateBuffer = []; // reset after sampling
+
+    void this.checkWake(candidate);
     return;
   }
 
-  if (this.state !== "listening") return;
+  // While listening, always append text
+  if (this.state === "listening") {
+    this.transcriptBuffer.push(text);
 
-  const sleepIndex = norm.indexOf(sleep);
-  if (sleepIndex !== -1) {
-    const beforeSleep = norm.slice(0, sleepIndex).trim();
-    if (beforeSleep) this.transcriptBuffer.push(beforeSleep);
-
-    void this.finishListening();
+    // occasionally check stop intent
+    const now = Date.now();
+    if (now - this.lastClassifyAt >= this.classifyCooldownMs) {
+      this.lastClassifyAt = now;
+      void this.checkStop(text);
+    }
     return;
   }
 
-  this.transcriptBuffer.push(norm);
-  }
+  // ignore when processing
+}
 
+private async checkWake(text: string): Promise<void> {
+  try {
+    const res = await classifyWakeStop({
+      apiKey: this.config.geminiApiKey,
+      model: this.config.geminiModel,
+      text,
+    });
+
+    if (!this.running) return;
+
+    if (res.wake) {
+      this.transcriptBuffer = [];
+      this.setState("listening");
+    }
+  } catch (e) {
+    this.emitError(e);
+  }
+}
+
+private async checkStop(text: string): Promise<void> {
+  try {
+    const res = await classifyWakeStop({
+      apiKey: this.config.geminiApiKey,
+      model: this.config.geminiModel,
+      text,
+    });
+
+    if (!this.running) return;
+
+    if (res.stop) {
+      void this.finishListening();
+    }
+  } catch (e) {
+    this.emitError(e);
+  }
+}
 
   private async finishListening(): Promise<void> {
     if (this.state !== 'listening') return;
