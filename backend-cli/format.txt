@@ -1,0 +1,6 @@
+- has two types query and choice
+- query is app to cli 
+- choice is app to cli
+
+- if text always, options only when choice to be made
+    - tts
