@@ -68,12 +68,14 @@ export class VoicePipeline {
   private ttsTrack: LocalAudioTrack | null = null;
   private ttsSampleRate: number | null = null;
   private ttsChannels: number | null = null;
+  private silenceTimer: NodeJS.Timeout | null = null;
+  private readonly silenceMs = 10_000;
 
   constructor(config: VoicePipelineConfig) {
     this.config = config;
     this.wakePhrase = (config.wakePhrase ?? 'hey aura').toLowerCase();
     this.sleepPhrase = (config.sleepPhrase ?? 'bye aura').toLowerCase();
-    this.segmentSeconds = config.sttSegmentSeconds ?? 0.5;
+    this.segmentSeconds = config.sttSegmentSeconds ?? 2;
   }
 
   async start(): Promise<void> {
@@ -221,40 +223,53 @@ export class VoicePipeline {
     }
   }
 
-  private handleTranscript(message: TranscriptMessage): void {
-    const text = message.text.trim();
-    if (!text) return;
-
-    this.config.onTranscript?.(text, Boolean(message.isFinal));
-
-    if (this.state === 'armed') {
-      const wakeIndex = text.toLowerCase().indexOf(this.wakePhrase);
-      if (wakeIndex === -1) return;
-
-      this.transcriptBuffer = [];
-      const afterWake = text.slice(wakeIndex + this.wakePhrase.length).trim();
-      if (afterWake) {
-        this.transcriptBuffer.push(afterWake);
-      }
-      this.setState('listening');
-      return;
-    }
-
-    if (this.state !== 'listening') return;
-
-    const lowerText = text.toLowerCase();
-    const sleepIndex = lowerText.indexOf(this.sleepPhrase);
-    if (sleepIndex !== -1) {
-      const beforeSleep = text.slice(0, sleepIndex).trim();
-      if (beforeSleep) {
-        this.transcriptBuffer.push(beforeSleep);
-      }
-      void this.finishListening();
-      return;
-    }
-
-    this.transcriptBuffer.push(text);
+  private normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")  // strip punctuation
+    .replace(/\s+/g, " ")
+    .trim();
   }
+
+
+  private handleTranscript(message: TranscriptMessage): void {
+  const raw = message.text.trim();
+  if (!raw) return;
+
+  this.config.onTranscript?.(raw, Boolean(message.isFinal));
+
+  const norm = this.normalize(raw);
+  const wake = this.normalize(this.wakePhrase);
+  const sleep = this.normalize(this.sleepPhrase);
+
+  if (this.state === "armed") {
+    const wakeIndex = norm.indexOf(wake);
+    if (wakeIndex === -1) return;
+
+    this.transcriptBuffer = [];
+
+    // keep anything after wake phrase (normalized)
+    const afterWake = norm.slice(wakeIndex + wake.length).trim();
+    if (afterWake) this.transcriptBuffer.push(afterWake);
+
+    this.setState("listening");
+    return;
+  }
+
+  if (this.state !== "listening") return;
+
+  const sleepIndex = norm.indexOf(sleep);
+  if (sleepIndex !== -1) {
+    const beforeSleep = norm.slice(0, sleepIndex).trim();
+    if (beforeSleep) this.transcriptBuffer.push(beforeSleep);
+
+    void this.finishListening();
+    return;
+  }
+
+  this.transcriptBuffer.push(norm);
+  }
+
 
   private async finishListening(): Promise<void> {
     if (this.state !== 'listening') return;
