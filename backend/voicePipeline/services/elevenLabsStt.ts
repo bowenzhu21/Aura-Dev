@@ -48,7 +48,7 @@ export const transcribeAudio = async (
     new Blob([wavBytes], { type: 'audio/wav' }),
     'audio.wav'
   );
-  form.append('model_id', request.modelId ?? 'scribe_v1');
+  form.append('model_id', request.modelId ?? 'scribe_v2');
   if (request.languageCode) {
     form.append('language_code', request.languageCode);
   }
